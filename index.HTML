@@ -1,0 +1,411 @@
+<script>
+const $ = id => document.getElementById(id);
+
+const SERVER =
+  "https://calm-waterfall-aaf4.1300-chul.workers.dev";
+
+let token = "";
+let currentUser = "";
+let books = [];
+let coverData = "";
+let busy = false;
+
+function message(text) {
+  $("message").textContent = text;
+}
+
+function setBusy(value) {
+  busy = value;
+
+  document.querySelectorAll(
+    "button, input, textarea"
+  ).forEach(element => {
+    element.disabled = value;
+  });
+}
+
+function showLogin() {
+  token = "";
+  currentUser = "";
+  books = [];
+
+  $("auth").hidden = false;
+  $("app").hidden = true;
+  $("books").replaceChildren();
+}
+
+async function api(path, method = "GET", data) {
+  const headers = {};
+
+  if (data !== undefined) {
+    headers["Content-Type"] = "application/json";
+  }
+
+  if (token) {
+    headers.Authorization = "Bearer " + token;
+  }
+
+  const response = await fetch(
+    SERVER + path,
+    {
+      method,
+      headers,
+      ...(data !== undefined
+        ? { body: JSON.stringify(data) }
+        : {}),
+      signal: AbortSignal.timeout(20000)
+    }
+  );
+
+  let result;
+
+  try {
+    result = await response.json();
+  } catch {
+    throw new Error("서버 응답을 읽을 수 없어.");
+  }
+
+  if (!response.ok) {
+    if (response.status === 401 && token) {
+      showLogin();
+    }
+
+    throw new Error(
+      result.message || "요청에 실패했어."
+    );
+  }
+
+  return result;
+}
+
+function updateClock() {
+  $("clock").textContent =
+    new Intl.DateTimeFormat(
+      "ko-KR",
+      {
+        timeZone: "Asia/Seoul",
+        dateStyle: "long",
+        timeStyle: "short"
+      }
+    ).format(new Date());
+}
+
+updateClock();
+setInterval(updateClock, 60000);
+
+// 기존 화면 설명 변경
+const authDescription =
+  $("auth").querySelector(".muted");
+
+if (authDescription) {
+  authDescription.textContent =
+    "서버용 아이디로 로그인하면 다른 기기에서도 내 서재를 볼 수 있어.";
+}
+
+$("review").maxLength = 3000;
+
+const footer = document.querySelector("footer");
+
+if (footer) {
+  footer.textContent =
+    "독서 기록은 JSONBin 서버에 저장돼. 여러 기기에서 동시에 저장하지 말아 줘.";
+}
+
+async function authenticate(signup) {
+  if (busy) return;
+
+  const username = $("username").value.trim();
+  const password = $("password").value;
+
+  if (!username || password.length < 8) {
+    message(
+      "아이디와 8글자 이상 비밀번호를 입력해 줘."
+    );
+    return;
+  }
+
+  let invite;
+
+  if (signup) {
+    invite = prompt(
+      "Cloudflare에 설정한 회원가입 초대코드를 입력해 줘."
+    );
+
+    if (invite === null) return;
+  }
+
+  setBusy(true);
+  message("서버에 연결 중…");
+
+  try {
+    const result = await api(
+      signup ? "/signup" : "/login",
+      "POST",
+      {
+        username,
+        password,
+        ...(signup ? { invite } : {})
+      }
+    );
+
+    token = result.token;
+    currentUser = result.username;
+
+    $("password").value = "";
+
+    const library = await api("/books");
+    books = library.books;
+
+    $("auth").hidden = true;
+    $("app").hidden = false;
+
+    renderBooks();
+
+    message(
+      signup
+        ? "서버용 아이디를 만들었어!"
+        : "내 서재를 불러왔어!"
+    );
+  } catch (error) {
+    showLogin();
+    message(error.message);
+  } finally {
+    setBusy(false);
+  }
+}
+
+$("authForm").onsubmit = event => {
+  event.preventDefault();
+  authenticate(false);
+};
+
+$("signup").onclick = () => authenticate(true);
+
+$("logout").onclick = () => {
+  if (busy) return;
+
+  showLogin();
+  coverData = "";
+
+  $("bookForm").reset();
+  $("preview").hidden = true;
+  $("preview").removeAttribute("src");
+
+  message("로그아웃했어.");
+};
+
+// JSONBin 용량에 맞게 표지를 작게 줄이기
+$("cover").onchange = async () => {
+  if (busy) return;
+
+  coverData = "";
+  $("preview").hidden = true;
+
+  const file = $("cover").files[0];
+
+  if (!file) return;
+
+  if (file.size > 8 * 1024 * 1024) {
+    $("cover").value = "";
+    message("8MB 이하 이미지를 골라 줘.");
+    return;
+  }
+
+  setBusy(true);
+  message("작은 표지 이미지를 만드는 중…");
+
+  let imageURL;
+
+  try {
+    imageURL = URL.createObjectURL(file);
+
+    const image = new Image();
+    image.src = imageURL;
+
+    await image.decode();
+
+    const scale = Math.min(
+      1,
+      120 / Math.max(image.width, image.height)
+    );
+
+    const canvas = document.createElement("canvas");
+
+    canvas.width = Math.max(
+      1,
+      Math.round(image.width * scale)
+    );
+
+    canvas.height = Math.max(
+      1,
+      Math.round(image.height * scale)
+    );
+
+    const context = canvas.getContext("2d");
+
+    context.fillStyle = "white";
+
+    context.fillRect(
+      0,
+      0,
+      canvas.width,
+      canvas.height
+    );
+
+    context.drawImage(
+      image,
+      0,
+      0,
+      canvas.width,
+      canvas.height
+    );
+
+    const compressed = canvas.toDataURL(
+      "image/jpeg",
+      0.45
+    );
+
+    if (compressed.length > 12000) {
+      throw new Error(
+        "표지가 너무 커. 더 단순한 이미지를 골라 줘."
+      );
+    }
+
+    coverData = compressed;
+    $("preview").src = coverData;
+    $("preview").hidden = false;
+
+    message("표지를 준비했어!");
+  } catch (error) {
+    $("cover").value = "";
+    message(
+      error.message || "이미지를 열지 못했어."
+    );
+  } finally {
+    if (imageURL) {
+      URL.revokeObjectURL(imageURL);
+    }
+
+    setBusy(false);
+  }
+};
+
+$("bookForm").onsubmit = async event => {
+  event.preventDefault();
+
+  if (busy || !token) return;
+
+  const title = $("title").value.trim();
+  const review = $("review").value.trim();
+
+  if (!title) {
+    message("책 제목을 입력해 줘!");
+    return;
+  }
+
+  setBusy(true);
+  message("서버에 저장 중…");
+
+  try {
+    const result = await api(
+      "/books",
+      "POST",
+      {
+        title,
+        review,
+        cover: coverData
+      }
+    );
+
+    books = result.books;
+
+    $("bookForm").reset();
+    coverData = "";
+
+    $("preview").hidden = true;
+    $("preview").removeAttribute("src");
+
+    renderBooks();
+    message("서버에 저장했어!");
+  } catch (error) {
+    message(
+      error.message +
+      " 저장 여부가 불확실하면 다시 로그인해 서재를 확인해 줘."
+    );
+  } finally {
+    setBusy(false);
+  }
+};
+
+function renderBooks() {
+  $("greeting").textContent =
+    currentUser + "님의 서재";
+
+  $("count").textContent =
+    "독서 기록 " + books.length + "개";
+
+  $("empty").hidden = books.length > 0;
+  $("books").replaceChildren();
+
+  for (const book of books) {
+    const card = document.createElement("article");
+    card.className = "book";
+
+    const cover = document.createElement("div");
+    cover.className = "cover";
+
+    if (
+      typeof book.cover === "string" &&
+      book.cover.startsWith(
+        "data:image/jpeg;base64,"
+      )
+    ) {
+      const image = document.createElement("img");
+
+      image.src = book.cover;
+      image.alt = book.title + " 표지";
+
+      cover.append(image);
+    } else {
+      const text = document.createElement("span");
+      text.textContent = "📖 " + book.title;
+
+      cover.append(text);
+    }
+
+    const info = document.createElement("div");
+    info.className = "info";
+
+    const title = document.createElement("h3");
+    title.textContent = book.title;
+
+    const date = document.createElement("small");
+    date.className = "muted";
+
+    const savedDate = new Date(book.date);
+
+    date.textContent = Number.isNaN(
+      savedDate.getTime()
+    )
+      ? "날짜 정보 없음"
+      : new Intl.DateTimeFormat(
+          "ko-KR",
+          {
+            timeZone: "Asia/Seoul",
+            dateStyle: "medium",
+            timeStyle: "short"
+          }
+        ).format(savedDate);
+
+    const review = document.createElement("p");
+
+    review.textContent =
+      book.review || "감상문이 아직 없어.";
+
+    info.append(title, date, review);
+    card.append(cover, info);
+
+    $("books").append(card);
+  }
+}
+</script>
